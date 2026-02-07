@@ -9,6 +9,12 @@ import hashlib
 import math
 
 
+# Hardcoded wandb configuration - modify these values for your setup
+WANDB_ENTITY = "your-entity-name"  # TODO: Replace with your wandb entity
+WANDB_PROJECT = "SiT-Seg"           # Project name for cell segmentation
+WANDB_API_KEY = "your-api-key"      # TODO: Replace with your wandb API key
+
+
 def is_main_process():
     return dist.get_rank() == 0
 
@@ -26,7 +32,7 @@ def generate_run_id(exp_name):
 
 def initialize(args, entity, exp_name, project_name):
     config_dict = namespace_to_dict(args)
-    wandb.login(key=os.environ["WANDB_KEY"])
+    wandb.login(key=WANDB_API_KEY)
     wandb.init(
         entity=entity,
         project=project_name,

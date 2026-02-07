@@ -14,7 +14,13 @@ from timm.models.vision_transformer import PatchEmbed, Attention, Mlp
 
 
 def modulate(x, shift, scale):
-    return x * (1 + scale.unsqueeze(1)) + shift.unsqueeze(1)
+    # x: (N, T, D), shift/scale: (N, T, D) for per-patch or (N, D) for global
+    # When shift/scale are (N, D), they need unsqueeze for broadcasting
+    # When shift/scale are (N, T, D), they can be used directly
+    if shift.dim() == 2:
+        return x * (1 + scale.unsqueeze(1)) + shift.unsqueeze(1)
+    else:
+        return x * (1 + scale) + shift
 
 
 #################################################################################
@@ -61,33 +67,50 @@ class TimestepEmbedder(nn.Module):
         return t_emb
 
 
-class LabelEmbedder(nn.Module):
+class MaskEmbedder(nn.Module):
     """
-    Embeds class labels into vector representations. Also handles label dropout for classifier-free guidance.
+    Embeds segmentation probability maps into per-patch vector representations.
+    
+    Input: (B, N, H, W) - N is number of classes, each position is a probability distribution
+    Output: (B, T, D) - T is number of patches, D is hidden_size
     """
-    def __init__(self, num_classes, hidden_size, dropout_prob):
+    def __init__(self, num_classes, hidden_size, patch_size, input_size):
         super().__init__()
-        use_cfg_embedding = dropout_prob > 0
-        self.embedding_table = nn.Embedding(num_classes + use_cfg_embedding, hidden_size)
         self.num_classes = num_classes
-        self.dropout_prob = dropout_prob
-
-    def token_drop(self, labels, force_drop_ids=None):
+        self.hidden_size = hidden_size
+        self.patch_size = patch_size
+        self.input_size = input_size
+        self.num_patches = (input_size // patch_size) ** 2
+        
+        # Learnable embedding vector for each class
+        self.class_embeddings = nn.Parameter(torch.randn(num_classes, hidden_size))
+    
+    def forward(self, mask_prob):
         """
-        Drops labels to enable classifier-free guidance.
+        Args:
+            mask_prob: (B, N, H, W) softmax probability map where N=num_classes
+                       Each spatial position sums to 1 across classes.
+                       H, W should match input_size.
+        
+        Returns:
+            embeddings: (B, T, D) per-patch condition embeddings
         """
-        if force_drop_ids is None:
-            drop_ids = torch.rand(labels.shape[0], device=labels.device) < self.dropout_prob
-        else:
-            drop_ids = force_drop_ids == 1
-        labels = torch.where(drop_ids, self.num_classes, labels)
-        return labels
-
-    def forward(self, labels, train, force_drop_ids=None):
-        use_dropout = self.dropout_prob > 0
-        if (train and use_dropout) or (force_drop_ids is not None):
-            labels = self.token_drop(labels, force_drop_ids)
-        embeddings = self.embedding_table(labels)
+        B, N, H, W = mask_prob.shape
+        p = self.patch_size
+        
+        # Reshape mask to patches: (B, N, H//p, p, W//p, p)
+        mask_patches = mask_prob.reshape(B, N, H // p, p, W // p, p)
+        # Average pool within each patch: (B, N, H//p, W//p)
+        mask_patches = mask_patches.mean(dim=(3, 5))
+        # Flatten spatial dims: (B, N, T) where T = (H//p) * (W//p)
+        T = mask_patches.shape[2] * mask_patches.shape[3]
+        mask_patches = mask_patches.reshape(B, N, T)
+        # Transpose for weighted sum: (B, T, N)
+        mask_patches = mask_patches.permute(0, 2, 1)
+        
+        # Weighted sum of class embeddings: (B, T, N) @ (N, D) -> (B, T, D)
+        embeddings = torch.matmul(mask_patches, self.class_embeddings)
+        
         return embeddings
 
 
@@ -113,9 +136,10 @@ class SiTBlock(nn.Module):
         )
 
     def forward(self, x, c):
-        shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = self.adaLN_modulation(c).chunk(6, dim=1)
-        x = x + gate_msa.unsqueeze(1) * self.attn(modulate(self.norm1(x), shift_msa, scale_msa))
-        x = x + gate_mlp.unsqueeze(1) * self.mlp(modulate(self.norm2(x), shift_mlp, scale_mlp))
+        # c is now (N, T, D) per-patch conditioning
+        shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = self.adaLN_modulation(c).chunk(6, dim=-1)
+        x = x + gate_msa * self.attn(modulate(self.norm1(x), shift_msa, scale_msa))
+        x = x + gate_mlp * self.mlp(modulate(self.norm2(x), shift_mlp, scale_mlp))
         return x
 
 
@@ -133,7 +157,8 @@ class FinalLayer(nn.Module):
         )
 
     def forward(self, x, c):
-        shift, scale = self.adaLN_modulation(c).chunk(2, dim=1)
+        # c is now (N, T, D) per-patch conditioning
+        shift, scale = self.adaLN_modulation(c).chunk(2, dim=-1)
         x = modulate(self.norm_final(x), shift, scale)
         x = self.linear(x)
         return x
@@ -152,8 +177,7 @@ class SiT(nn.Module):
         depth=28,
         num_heads=16,
         mlp_ratio=4.0,
-        class_dropout_prob=0.1,
-        num_classes=1000,
+        num_classes=2,
         learn_sigma=True,
     ):
         super().__init__()
@@ -162,10 +186,12 @@ class SiT(nn.Module):
         self.out_channels = in_channels * 2 if learn_sigma else in_channels
         self.patch_size = patch_size
         self.num_heads = num_heads
+        self.input_size = input_size
+        self.num_classes = num_classes
 
         self.x_embedder = PatchEmbed(input_size, patch_size, in_channels, hidden_size, bias=True)
         self.t_embedder = TimestepEmbedder(hidden_size)
-        self.y_embedder = LabelEmbedder(num_classes, hidden_size, class_dropout_prob)
+        self.y_embedder = MaskEmbedder(num_classes, hidden_size, patch_size, input_size)
         num_patches = self.x_embedder.num_patches
         # Will use fixed sin-cos embedding:
         self.pos_embed = nn.Parameter(torch.zeros(1, num_patches, hidden_size), requires_grad=False)
@@ -194,8 +220,8 @@ class SiT(nn.Module):
         nn.init.xavier_uniform_(w.view([w.shape[0], -1]))
         nn.init.constant_(self.x_embedder.proj.bias, 0)
 
-        # Initialize label embedding table:
-        nn.init.normal_(self.y_embedder.embedding_table.weight, std=0.02)
+        # Initialize mask class embedding:
+        nn.init.normal_(self.y_embedder.class_embeddings, std=0.02)
 
         # Initialize timestep embedding MLP:
         nn.init.normal_(self.t_embedder.mlp[0].weight, std=0.02)
@@ -227,33 +253,34 @@ class SiT(nn.Module):
         imgs = x.reshape(shape=(x.shape[0], c, h * p, h * p))
         return imgs
 
-    def forward(self, x, t, y):
+    def forward(self, x, t, mask):
         """
         Forward pass of SiT.
         x: (N, C, H, W) tensor of spatial inputs (images or latent representations of images)
         t: (N,) tensor of diffusion timesteps
-        y: (N,) tensor of class labels
+        mask: (N, num_classes, H, W) tensor of segmentation probability map
         """
         x = self.x_embedder(x) + self.pos_embed  # (N, T, D), where T = H * W / patch_size ** 2
         t = self.t_embedder(t)                   # (N, D)
-        y = self.y_embedder(y, self.training)    # (N, D)
-        c = t + y                                # (N, D)
+        y = self.y_embedder(mask)                # (N, T, D) per-patch condition
+        c = t.unsqueeze(1) + y                   # (N, T, D) broadcast t to all patches
         for block in self.blocks:
             x = block(x, c)                      # (N, T, D)
-        x = self.final_layer(x, c)                # (N, T, patch_size ** 2 * out_channels)
+        x = self.final_layer(x, c)               # (N, T, patch_size ** 2 * out_channels)
         x = self.unpatchify(x)                   # (N, out_channels, H, W)
         if self.learn_sigma:
             x, _ = x.chunk(2, dim=1)
         return x
 
-    def forward_with_cfg(self, x, t, y, cfg_scale):
+    def forward_with_cfg(self, x, t, mask, cfg_scale):
         """
-        Forward pass of SiT, but also batches the unconSiTional forward pass for classifier-free guidance.
+        Forward pass of SiT, but also batches the unconditional forward pass for classifier-free guidance.
+        mask should already be concatenated as [cond_mask, null_mask].
         """
         # https://github.com/openai/glide-text2im/blob/main/notebooks/text2im.ipynb
         half = x[: len(x) // 2]
         combined = torch.cat([half, half], dim=0)
-        model_out = self.forward(combined, t, y)
+        model_out = self.forward(combined, t, mask)
         # For exact reproducibility reasons, we apply classifier-free guidance on only
         # three channels by default. The standard approach to cfg applies it to all channels.
         # This can be done by uncommenting the following line and commenting-out the line following that.
