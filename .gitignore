@@ -2,6 +2,9 @@ __pycache__
 wandb
 
 .DS_store
-samples
-results
-pretrained_models
+SiT_seg/samples
+SiT_seg/results
+SiT_seg/pretrained_models
+train_segmentation/outputs
+
+.history

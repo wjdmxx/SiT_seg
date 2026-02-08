@@ -10,9 +10,9 @@ import math
 
 
 # Hardcoded wandb configuration - modify these values for your setup
-WANDB_ENTITY = "your-entity-name"  # TODO: Replace with your wandb entity
-WANDB_PROJECT = "SiT-Seg"           # Project name for cell segmentation
-WANDB_API_KEY = "your-api-key"      # TODO: Replace with your wandb API key
+WANDB_ENTITY = "lyxszn-beihang-university"  # TODO: Replace with your wandb entity
+WANDB_PROJECT = "SiT-Seg-cell"           # Project name for cell segmentation
+WANDB_API_KEY = "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"      # TODO: Replace with your wandb API key
 
 
 def is_main_process():

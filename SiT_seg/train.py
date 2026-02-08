@@ -318,8 +318,8 @@ if __name__ == "__main__":
     parser.add_argument("--num-workers", type=int, default=4)
     parser.add_argument("--log-every", type=int, default=100)
     parser.add_argument("--ckpt-every", type=int, default=50_000)
-    parser.add_argument("--sample-every", type=int, default=10_000)
-    parser.add_argument("--cfg-scale", type=float, default=4.0)
+    parser.add_argument("--sample-every", type=int, default=5_000)
+    parser.add_argument("--cfg-scale", type=float, default=1.0)
     parser.add_argument("--wandb", action="store_true")
     parser.add_argument("--ckpt", type=str, default=None,
                         help="Optional path to a custom SiT checkpoint")
