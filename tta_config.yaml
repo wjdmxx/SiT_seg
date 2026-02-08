@@ -1,0 +1,44 @@
+# =============================================================================
+# TTA (Test-Time Adaptation) Configuration
+# =============================================================================
+
+# 数据路径
+data:
+  image_dir: "path/to/test/images"     # 测试图像目录 (RGB或灰度均可)
+  mask_dir: "path/to/test/masks"       # GT mask目录 (用于评估指标，可设为null跳过)
+
+# 分割模型配置
+segmentation:
+  ckpt_path: "path/to/segmentation/checkpoint.pth"
+  in_channels: 1                        # 输入通道数 (灰度=1)
+  num_classes: 2                        # 输出类别数
+
+# SiT 生成模型配置
+sit:
+  model: "SiT-B/2"                      # 模型架构: SiT-B/2, SiT-L/2, SiT-XL/2 等
+  ckpt_path: "path/to/sit/checkpoint.pt"
+  vae: "mse"                            # VAE类型: "ema" 或 "mse"
+  num_classes: 2                        # 与分割模型类别数一致
+
+# TTA 训练配置
+tta:
+  timestep: 0.5                         # 加噪时间步 t ∈ (0, 1)，越大噪声越小
+  learning_rate: 1.0e-5                 # 学习率
+  epochs: 3                             # 遍历全部数据的次数
+  batch_size: 4                         # 每批次样本数
+  gradient_accumulation_steps: 1        # 梯度累积步数 (有效batch = batch_size * accumulation)
+  
+  # 可选: 分别控制两个模型的学习率
+  seg_lr_scale: 1.0                     # 分割模型学习率缩放因子
+  sit_lr_scale: 1.0                     # SiT模型学习率缩放因子
+
+# 通用配置
+image_size: 256                         # 输入图像尺寸 (必须是8的倍数)
+device: "cuda"                          # 设备: "cuda" 或 "cpu"
+seed: 42                                # 随机种子
+num_workers: 4                          # 数据加载线程数
+
+# 输出配置
+output:
+  dir: "outputs/tta"                    # 输出目录
+  save_checkpoint: false                # 是否保存checkpoint (可选)
